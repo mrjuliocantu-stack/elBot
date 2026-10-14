@@ -113,6 +113,9 @@ async function generarRespuesta(usuario, texto) {
 
 // Envía un mensaje de WhatsApp
 async function enviar(para, texto) {
+  // México: WhatsApp entrega el número como 521XXXXXXXXXX pero la API lo
+  // espera como 52XXXXXXXXXX. Se quita el "1" para que coincida.
+  if (/^521\d{10}$/.test(para)) para = "52" + para.slice(3);
   const r = await fetch(
     `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`,
     {
