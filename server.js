@@ -119,6 +119,31 @@ async function enviar(para, texto) {
 
 app.get("/", (req, res) => res.send("El bot está funcionando ✅"));
 
+// Página de política de privacidad (Meta la pide para publicar la app)
+app.get("/privacidad", (req, res) => {
+  const correo = process.env.CONTACT_EMAIL || "tu-correo@ejemplo.com";
+  res.send(`<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Política de Privacidad - ELbot</title>
+<style>body{font-family:Arial,sans-serif;max-width:700px;margin:40px auto;padding:0 16px;line-height:1.6;color:#222}</style>
+</head><body>
+<h1>Política de Privacidad</h1>
+<p>Última actualización: octubre de 2026.</p>
+<p>ELbot es un asistente automático que responde mensajes por WhatsApp.</p>
+<h2>Qué datos recopilamos</h2>
+<p>Únicamente tu número de teléfono y el contenido de los mensajes que nos envías, con el fin de poder responderte.</p>
+<h2>Cómo usamos tus datos</h2>
+<p>Usamos tus mensajes solo para generar respuestas. Podemos usar servicios de inteligencia artificial de terceros para procesarlos. No vendemos ni compartimos tus datos con fines publicitarios.</p>
+<h2>Conservación</h2>
+<p>Las conversaciones se guardan temporalmente en memoria y se eliminan cuando el servicio se reinicia.</p>
+<h2>Eliminación de datos</h2>
+<p>Puedes solicitar la eliminación de tus datos escribiendo a: <a href="mailto:${correo}">${correo}</a></p>
+<h2>Contacto</h2>
+<p>Para cualquier duda sobre esta política: ${correo}</p>
+</body></html>`);
+});
+
 app.listen(PORT || 3000, () =>
   console.log(`Servidor listo en el puerto ${PORT || 3000}`)
 );
