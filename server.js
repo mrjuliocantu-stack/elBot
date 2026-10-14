@@ -33,8 +33,23 @@ app.get("/webhook", (req, res) => {
 });
 
 // 2) Meta envía aquí cada mensaje que recibes
+// Suscribe tu cuenta de WhatsApp Business a esta app (necesario para recibir mensajes reales)
+// Uso: abre en el navegador /suscribir?clave=TU_VERIFY_TOKEN
+app.get("/suscribir", async (req, res) => {
+  if (req.query.clave !== VERIFY_TOKEN) return res.sendStatus(403);
+  const waba = process.env.WABA_ID || "2571359863363370";
+  const r = await fetch(
+    `https://graph.facebook.com/v21.0/${waba}/subscribed_apps`,
+    { method: "POST", headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+  );
+  const texto = await r.text();
+  console.log("Suscripción:", texto);
+  res.send(`Respuesta de Meta: ${texto}`);
+});
+
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200); // Responder rápido a Meta
+  console.log("Webhook recibido:", JSON.stringify(req.body).slice(0, 300));
 
   try {
     const mensaje =
