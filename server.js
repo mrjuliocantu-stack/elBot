@@ -1,5 +1,5 @@
 // Asistente del Hogar por WhatsApp (Cloud API de Meta + Claude)
-// Menú y lista del súper + control de gastos + recordatorios.
+// Menú y lista del súper + control de gastos + recordatorios + envío de fotos.
 // No necesitas modificar este archivo: todo se configura en Railway > Variables.
 
 require("dotenv").config();
@@ -22,6 +22,16 @@ const OFFSET_MS = Number(process.env.UTC_OFFSET_HOURS ?? -6) * 3600000;
 
 const app = express();
 app.use(express.json());
+
+// ---------------------------------------------------------------------
+// Fotos: se guardan en la carpeta /fotos del repositorio y se sirven
+// públicamente para que WhatsApp pueda descargarlas.
+// ---------------------------------------------------------------------
+app.use("/fotos", express.static(path.join(__dirname, "fotos")));
+const BASE_URL = process.env.BASE_URL || `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+const FOTOS_DIR = path.join(__dirname, "fotos");
+const FOTOS = fs.existsSync(FOTOS_DIR) ? fs.readdirSync(FOTOS_DIR) : [];
+const pendientes = {}; // fotos por enviar después de la respuesta de texto
 
 // ---------------------------------------------------------------------
 // Datos guardados (gastos, lista del súper, recordatorios) en un archivo
@@ -166,6 +176,18 @@ const HERRAMIENTAS = [
       required: ["id"],
     },
   },
+  {
+    name: "enviar_foto",
+    description: "Envía una foto al usuario. Fotos disponibles: " + (FOTOS.join(", ") || "ninguna"),
+    input_schema: {
+      type: "object",
+      properties: {
+        archivo: { type: "string", description: "Nombre exacto del archivo" },
+        descripcion: { type: "string", description: "Texto corto que acompaña la foto" },
+      },
+      required: ["archivo"],
+    },
+  },
 ];
 
 function ejecutarHerramienta(usuario, nombre, entrada) {
@@ -260,6 +282,14 @@ function ejecutarHerramienta(usuario, nombre, entrada) {
         guardar();
         return d.recordatorios.length < antes ? { ok: true } : { error: "No encontré ese recordatorio" };
       }
+      case "enviar_foto": {
+        if (!FOTOS.includes(entrada.archivo)) return { error: "Esa foto no existe", disponibles: FOTOS };
+        (pendientes[usuario] = pendientes[usuario] || []).push({
+          archivo: entrada.archivo,
+          caption: entrada.descripcion || "",
+        });
+        return { ok: true };
+      }
       default:
         return { error: "Herramienta desconocida" };
     }
@@ -281,7 +311,10 @@ Ayudas con tres cosas:
 2) GASTOS: cuando digan que gastaron algo, usa registrar_gasto y confirma con el total del mes. Para resúmenes usa resumen_gastos y da el total y el desglose por categoría.
 3) RECORDATORIOS: pagos de luz, agua, colegiaturas, citas, cumpleaños. Usa crear_recordatorio con la fecha y hora exacta. Si no dicen la hora, pregúntala. Confirma diciendo cuándo se enviará.
 
+4) FOTOS: si la persona manda una foto de comida, di qué platillo parece y lista los ingredientes principales (con cantidades aproximadas si puedes). Aclara que es una estimación y ofrece agregar los ingredientes a la lista del súper. Si la foto no es de comida, describe brevemente lo que ves y pregunta en qué la puedes ayudar.
+
 Reglas: responde siempre en español, con mensajes cortos y claros al estilo WhatsApp. Usa *negritas* con un solo asterisco y pocos emojis. No uses encabezados ni tablas. Usa siempre las herramientas para guardar o consultar datos; nunca inventes montos, listas ni recordatorios. No des consejos médicos ni financieros profesionales. Nunca pidas contraseñas ni datos bancarios.
+
 ${BOT_INSTRUCTIONS || ""}`;
 }
 
@@ -311,23 +344,29 @@ async function llamarClaude(mensajes) {
   return data;
 }
 
-async function generarRespuesta(usuario, texto) {
+async function generarRespuesta(usuario, texto, imagen) {
   if (!ANTHROPIC_API_KEY) return `Recibí tu mensaje: "${texto}"`;
-
   const hist = (historial[usuario] = historial[usuario] || []);
-  hist.push({ role: "user", content: texto });
-
+  // En el historial solo se guarda texto (las fotos pesan mucho)
+  hist.push({ role: "user", content: imagen ? `[Foto enviada] ${texto}` : texto });
   const mensajes = hist.slice(-12);
   while (mensajes.length && mensajes[0].role !== "user") mensajes.shift();
+  if (imagen) {
+    mensajes[mensajes.length - 1] = {
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: imagen.media_type, data: imagen.data } },
+        { type: "text", text: texto },
+      ],
+    };
+  }
 
   let textoFinal = "";
   for (let vuelta = 0; vuelta < 6; vuelta++) {
     const data = await llamarClaude(mensajes);
     if (!data) return "Lo siento, tuve un problema para responder. Intenta de nuevo en un momento.";
-
     mensajes.push({ role: "assistant", content: data.content });
     const usos = data.content.filter((b) => b.type === "tool_use");
-
     if (data.stop_reason === "tool_use" && usos.length) {
       const resultados = usos.map((u) => ({
         type: "tool_result",
@@ -340,7 +379,6 @@ async function generarRespuesta(usuario, texto) {
     textoFinal = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
     break;
   }
-
   textoFinal = textoFinal || "Listo ✅";
   hist.push({ role: "assistant", content: textoFinal });
   historial[usuario] = hist.slice(-12);
@@ -379,6 +417,40 @@ async function enviar(para, texto) {
   }
 }
 
+// Enviar una foto (la imagen debe estar en la carpeta /fotos del repositorio)
+async function enviarFoto(para, archivo, caption) {
+  if (/^521\d{10}$/.test(para)) para = "52" + para.slice(3);
+  try {
+    const r = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: para,
+        type: "image",
+        image: { link: `${BASE_URL}/fotos/${encodeURIComponent(archivo)}`, caption: caption || "" },
+      }),
+    });
+    if (!r.ok) console.error("Error al enviar foto:", await r.text());
+  } catch (e) {
+    console.error("Error al enviar foto:", e.message);
+  }
+}
+
+// Descarga una foto que mandó el usuario y la deja lista para Claude
+async function descargarImagen(mediaId) {
+  const h = { Authorization: `Bearer ${WHATSAPP_TOKEN}` };
+  const meta = await (await fetch(`https://graph.facebook.com/v21.0/${mediaId}`, { headers: h })).json();
+  if (!meta.url) throw new Error("Meta no devolvió la URL de la imagen: " + JSON.stringify(meta));
+  const r = await fetch(meta.url, { headers: h });
+  if (!r.ok) throw new Error("No pude descargar la imagen: " + r.status);
+  const buf = Buffer.from(await r.arrayBuffer());
+  return { media_type: meta.mime_type || "image/jpeg", data: buf.toString("base64") };
+}
+
 // Meta llama aquí para verificar que el webhook es tuyo
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -413,21 +485,34 @@ app.post("/webhook", async (req, res) => {
   try {
     const mensaje = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!mensaje) return; // eventos que no son mensajes (estados, etc.)
-
     if (vistos.has(mensaje.id)) return;
     vistos.add(mensaje.id);
     if (vistos.size > 500) vistos.clear();
 
     const de = mensaje.from;
-    if (mensaje.type !== "text") {
-      await enviar(de, "Por ahora solo entiendo mensajes de texto 🙂");
+    let texto;
+    let imagen = null;
+    if (mensaje.type === "image") {
+      texto = mensaje.image.caption || "Dime qué hay en esta foto. Si es comida, dime los ingredientes.";
+      try {
+        imagen = await descargarImagen(mensaje.image.id);
+      } catch (e) {
+        console.error("Error con la foto:", e.message);
+        await enviar(de, "No pude abrir la foto, intenta mandarla de nuevo 🙏");
+        return;
+      }
+    } else if (mensaje.type === "text") {
+      texto = mensaje.text.body;
+    } else {
+      await enviar(de, "Por ahora solo entiendo mensajes de texto y fotos 🙂");
       return;
     }
-
-    const texto = mensaje.text.body;
-    console.log(`Mensaje de ${de}: ${texto}`);
-    const respuesta = await generarRespuesta(de, texto);
+    console.log(`Mensaje de ${de}: ${texto}${imagen ? " (con foto)" : ""}`);
+    const respuesta = await generarRespuesta(de, texto, imagen);
     await enviar(de, respuesta);
+    // Fotos que Claude pidió enviar
+    for (const f of pendientes[de] || []) await enviarFoto(de, f.archivo, f.caption);
+    pendientes[de] = [];
   } catch (err) {
     console.error("Error:", err);
   }
