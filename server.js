@@ -16,7 +16,7 @@ const {
   PORT,
 } = process.env;
 
-const MODELO = process.env.CLAUDE_MODEL || "claude-haiku-5-5";
+const MODELO = process.env.CLAUDE_MODEL || "claude-sonnet-5-5";
 // Diferencia de horas con UTC (México: -6)
 const OFFSET_MS = Number(process.env.UTC_OFFSET_HOURS ?? -6) * 3600000;
 
@@ -120,6 +120,44 @@ const HERRAMIENTAS = [
     },
   },
   {
+    name: "ver_gastos",
+    description: "Lista los gastos guardados con su id, fecha, monto y descripción. Úsala antes de borrar o editar un gasto específico, o cuando pregunten qué gastos hay.",
+    input_schema: {
+      type: "object",
+      properties: {
+        desde: { type: "string", description: "YYYY-MM-DD opcional" },
+        hasta: { type: "string", description: "YYYY-MM-DD opcional" },
+        texto: { type: "string", description: "Filtrar por palabra en descripción o categoría" },
+      },
+    },
+  },
+  {
+    name: "borrar_gasto",
+    description: "Elimina gastos por id (obtén los ids con ver_gastos) o todos con borrar_todos.",
+    input_schema: {
+      type: "object",
+      properties: {
+        ids: { type: "array", items: { type: "number" } },
+        borrar_todos: { type: "boolean" },
+      },
+    },
+  },
+  {
+    name: "editar_gasto",
+    description: "Cambia monto, categoría, descripción o fecha de un gasto por id.",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "number" },
+        monto: { type: "number" },
+        categoria: { type: "string" },
+        descripcion: { type: "string" },
+        fecha: { type: "string", description: "YYYY-MM-DD" },
+      },
+      required: ["id"],
+    },
+  },
+  {
     name: "borrar_ultimo_gasto",
     description: "Elimina el último gasto registrado (por si se equivocó).",
     input_schema: { type: "object", properties: {} },
@@ -198,6 +236,7 @@ function ejecutarHerramienta(usuario, nombre, entrada) {
         const monto = Number(entrada.monto);
         if (!(monto > 0)) return { error: "El monto debe ser mayor a 0" };
         const gasto = {
+          id: d.siguienteId++,
           monto,
           categoria: (entrada.categoria || "otros").toLowerCase(),
           descripcion: entrada.descripcion || "",
@@ -227,6 +266,33 @@ function ejecutarHerramienta(usuario, nombre, entrada) {
           por_categoria: porCategoria,
           ultimos: lista.slice(-5),
         };
+      }
+      case "ver_gastos": {
+        d.gastos.forEach((g) => { if (!g.id) g.id = d.siguienteId++; });
+        const t = (entrada.texto || "").toLowerCase();
+        const lista = d.gastos.filter((g) =>
+          (!entrada.desde || g.fecha >= entrada.desde) &&
+          (!entrada.hasta || g.fecha <= entrada.hasta) &&
+          (!t || (g.descripcion + " " + g.categoria).toLowerCase().includes(t)));
+        guardar();
+        return { total: lista.reduce((s, g) => s + g.monto, 0), gastos: lista.slice(-40) };
+      }
+      case "borrar_gasto": {
+        const antes = d.gastos.length;
+        if (entrada.borrar_todos) d.gastos = [];
+        else d.gastos = d.gastos.filter((g) => !(entrada.ids || []).includes(g.id));
+        guardar();
+        return { ok: true, borrados: antes - d.gastos.length };
+      }
+      case "editar_gasto": {
+        const g = d.gastos.find((x) => x.id === entrada.id);
+        if (!g) return { error: "No encontré ese gasto, usa ver_gastos" };
+        if (entrada.monto > 0) g.monto = Number(entrada.monto);
+        if (entrada.categoria) g.categoria = entrada.categoria.toLowerCase();
+        if (entrada.descripcion) g.descripcion = entrada.descripcion;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(entrada.fecha || "")) g.fecha = entrada.fecha;
+        guardar();
+        return { ok: true, gasto: g };
       }
       case "borrar_ultimo_gasto": {
         const g = d.gastos.pop();
@@ -313,7 +379,9 @@ Ayudas con tres cosas:
 
 4) FOTOS: si la persona manda una foto de comida, di qué platillo parece y lista los ingredientes principales (con cantidades aproximadas si puedes). Aclara que es una estimación y ofrece agregar los ingredientes a la lista del súper. Si la foto no es de comida, describe brevemente lo que ves y pregunta en qué la puedes ayudar.
 
-Reglas: responde siempre en español, con mensajes cortos y claros al estilo WhatsApp. Usa *negritas* con un solo asterisco y pocos emojis. No uses encabezados ni tablas. Usa siempre las herramientas para guardar o consultar datos; nunca inventes montos, listas ni recordatorios. No des consejos médicos ni financieros profesionales. Nunca pidas contraseñas ni datos bancarios.
+Reglas: responde siempre en español, con mensajes cortos y claros al estilo WhatsApp. Usa *negritas* con un solo asterisco y pocos emojis. No uses encabezados ni tablas. Usa siempre las herramientas para guardar o consultar datos; nunca inventes montos, listas ni recordatorios.
+REGLA CRÍTICA: nunca digas que guardaste, borraste, cambiaste o revisaste algo si no llamaste la herramienta en ESTE turno y te devolvió ok. Si la herramienta da error, dilo tal cual. Para borrar o editar un gasto específico, primero usa ver_gastos para obtener su id. Si piden "borrar todo", confirma qué (gastos, lista o recordatorios) antes de hacerlo.
+Contesta también preguntas generales (recetas, consejos de casa, cálculos, dudas) de forma completa; no te limites a guardar datos. No des consejos médicos ni financieros profesionales. Nunca pidas contraseñas ni datos bancarios.
 
 ${BOT_INSTRUCTIONS || ""}`;
 }
@@ -330,7 +398,7 @@ async function llamarClaude(mensajes) {
     },
     body: JSON.stringify({
       model: MODELO,
-      max_tokens: 700,
+      max_tokens: 1500,
       system: instrucciones(),
       tools: HERRAMIENTAS,
       messages: mensajes,
@@ -344,8 +412,59 @@ async function llamarClaude(mensajes) {
   return data;
 }
 
+// ---------------------------------------------------------------------
+// Groq (opcional): pon GROQ_API_KEY en Railway para usarlo en vez de Claude
+// ---------------------------------------------------------------------
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+async function llamarGroq(mensajes) {
+  const msgs = [{ role: "system", content: instrucciones() }];
+  for (const m of mensajes) {
+    if (typeof m.content === "string") { msgs.push({ role: m.role, content: m.content }); continue; }
+    if (m.role === "assistant") {
+      const texto = m.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+      const calls = m.content.filter((b) => b.type === "tool_use").map((b) => ({
+        id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input || {}) },
+      }));
+      msgs.push({ role: "assistant", content: texto || null, ...(calls.length ? { tool_calls: calls } : {}) });
+    } else {
+      const textos = [];
+      for (const b of m.content) {
+        if (b.type === "tool_result") msgs.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.content });
+        else if (b.type === "text") textos.push(b.text);
+        else if (b.type === "image") textos.push("[El usuario mandó una foto; con este modelo no puedo verla]");
+      }
+      if (textos.length) msgs.push({ role: "user", content: textos.join("\n") });
+    }
+  }
+  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      max_tokens: 1500,
+      messages: msgs,
+      tools: HERRAMIENTAS.map((h) => ({
+        type: "function",
+        function: { name: h.name, description: h.description, parameters: h.input_schema },
+      })),
+    }),
+  });
+  const data = await r.json();
+  if (!r.ok) { console.error("Error de Groq:", JSON.stringify(data)); return null; }
+  const msg = data.choices?.[0]?.message || {};
+  const content = [];
+  if (msg.content) content.push({ type: "text", text: msg.content });
+  for (const c of msg.tool_calls || []) {
+    let input = {};
+    try { input = JSON.parse(c.function.arguments || "{}"); } catch {}
+    content.push({ type: "tool_use", id: c.id, name: c.function.name, input });
+  }
+  return { content, stop_reason: (msg.tool_calls || []).length ? "tool_use" : "end_turn" };
+}
+const llamarIA = (m) => (process.env.GROQ_API_KEY ? llamarGroq(m) : llamarClaude(m));
+
 async function generarRespuesta(usuario, texto, imagen) {
-  if (!ANTHROPIC_API_KEY) return `Recibí tu mensaje: "${texto}"`;
+  if (!ANTHROPIC_API_KEY && !process.env.GROQ_API_KEY) return `Recibí tu mensaje: "${texto}"`;
   const hist = (historial[usuario] = historial[usuario] || []);
   // En el historial solo se guarda texto (las fotos pesan mucho)
   hist.push({ role: "user", content: imagen ? `[Foto enviada] ${texto}` : texto });
@@ -363,7 +482,7 @@ async function generarRespuesta(usuario, texto, imagen) {
 
   let textoFinal = "";
   for (let vuelta = 0; vuelta < 6; vuelta++) {
-    const data = await llamarClaude(mensajes);
+    const data = await llamarIA(mensajes);
     if (!data) return "Lo siento, tuve un problema para responder. Intenta de nuevo en un momento.";
     mensajes.push({ role: "assistant", content: data.content });
     const usos = data.content.filter((b) => b.type === "tool_use");
@@ -380,7 +499,10 @@ async function generarRespuesta(usuario, texto, imagen) {
     break;
   }
   textoFinal = textoFinal || "Listo ✅";
-  hist.push({ role: "assistant", content: textoFinal });
+  // Guardar en el historial qué herramientas se usaron realmente
+  const usadas = mensajes.slice(-12).flatMap((m) => Array.isArray(m.content) ? m.content : [])
+    .filter((b) => b.type === "tool_use").map((b) => b.name);
+  hist.push({ role: "assistant", content: (usadas.length ? `[Herramientas usadas: ${[...new Set(usadas)].join(", ")}] ` : "") + textoFinal });
   historial[usuario] = hist.slice(-12);
   return textoFinal;
 }
@@ -505,6 +627,11 @@ app.post("/webhook", async (req, res) => {
       texto = mensaje.text.body;
     } else {
       await enviar(de, "Por ahora solo entiendo mensajes de texto y fotos 🙂");
+      return;
+    }
+    if (/^\s*reiniciar\s*$/i.test(texto)) {
+      historial[de] = [];
+      await enviar(de, "Listo, borré la conversación. Tus gastos, lista y recordatorios siguen guardados ✅");
       return;
     }
     console.log(`Mensaje de ${de}: ${texto}${imagen ? " (con foto)" : ""}`);
