@@ -702,4 +702,22 @@ app.get("/privacidad", (req, res) => {
 </body></html>`);
 });
 
+// ---------------------------------------------------------------------
+// Despertador de Supabase (ObraPro): una consulta al día para que el
+// proyecto gratis no se pause por inactividad.
+// Para apagarlo borra la variable SUPABASE_PING_URL en Railway.
+// ---------------------------------------------------------------------
+const SUPA_URL = process.env.SUPABASE_PING_URL || "https://dueuaecfmydaevhgbmwg.supabase.co/rest/v1/obras?select=*&limit=1";
+const SUPA_KEY = process.env.SUPABASE_PING_KEY || "sb_publishable_pELyQ8-pP6y2l2y40JI0Wg_CGQV5H6J";
+async function despertarSupabase() {
+  try {
+    const r = await fetch(SUPA_URL, { headers: { apikey: SUPA_KEY } });
+    console.log("Despertador Supabase:", r.status);
+  } catch (e) {
+    console.error("Despertador Supabase falló:", e.message);
+  }
+}
+setTimeout(despertarSupabase, 60000);
+setInterval(despertarSupabase, 24 * 3600000);
+
 app.listen(PORT || 3000, () => console.log(`Servidor listo en el puerto ${PORT || 3000}`));
